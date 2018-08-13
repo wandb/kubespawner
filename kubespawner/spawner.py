@@ -28,7 +28,7 @@ from jinja2 import Environment, BaseLoader
 from .clients import shared_client
 from kubespawner.traitlets import Callable
 from kubespawner.objects import make_pod, make_pvc
-from kubespawner.reflector import NamespacedResourceReflector
+from kubespawner.reflector import NamespacedResourceReflector, CustomNamespacedResourceReflector
 from asyncio import sleep
 from async_generator import async_generator, yield_
 
@@ -55,6 +55,7 @@ class EventReflector(NamespacedResourceReflector):
 
     list_method_name = 'list_namespaced_event'
 
+
     @property
     def events(self):
         return sorted(
@@ -62,6 +63,17 @@ class EventReflector(NamespacedResourceReflector):
             key=lambda x: x.last_timestamp,
         )
 
+class SnapshotReflector(CustomNamespacedResourceReflector):
+    kind = 'volumesnapshot'
+    timeout_seconds = 0
+    list_method_name = 'list_namespaced_custom_object'
+    api_group_name = 'CustomObjectsApi'
+    custom_api_group_name = 'volumesnapshot.external-storage.k8s.io'
+    custom_api_plural_name = 'volumesnapshots'
+
+    @property
+    def snapshots(self):
+        return self.resources
 
 class KubeSpawner(Spawner):
     """
@@ -86,6 +98,12 @@ class KubeSpawner(Spawner):
         if self.events_enabled:
             return self.reflectors['events']
 
+    @property
+    def snapshot_reflector(self):
+        """alias to reflectors['snapshots']"""
+        if self.snapshots_enabled:
+            return self.reflectors['snapshots']
+
     def __init__(self, *args, **kwargs):
         _mock = kwargs.pop('_mock', False)
         super().__init__(*args, **kwargs)
@@ -105,6 +123,8 @@ class KubeSpawner(Spawner):
         # This will start watching in __init__, so it'll start the first
         # time any spawner object is created. Not ideal but works!
         self._start_watching_pods()
+        if self.snapshots_enabled:
+            self._start_watching_snapshots()
         if self.events_enabled:
             self._start_watching_events()
 
@@ -112,6 +132,7 @@ class KubeSpawner(Spawner):
 
         self.pod_name = self._expand_user_properties(self.pod_name_template)
         self.pvc_name = self._expand_user_properties(self.pvc_name_template)
+        self.snapshot_name = self.pvc_name.replace("claim-", "snapshot-")
         if self.hub_connect_ip:
             scheme, netloc, path, params, query, fragment = urlparse(self.hub.api_url)
             netloc = '{ip}:{port}'.format(
@@ -150,6 +171,14 @@ class KubeSpawner(Spawner):
         or to save some performance cost.
         """
         )
+
+    snapshots_enabled = Bool(
+        True,
+        config=True,
+        help="""
+        Enable snapshoting of user pvc claims
+        """
+    )
 
     namespace = Unicode(
         config=True,
@@ -1465,6 +1494,17 @@ class KubeSpawner(Spawner):
         """
         return self._start_reflector("pods", PodReflector, replace=replace)
 
+    def _start_watching_snapshots(self, replace=False):
+        """Start the snapshot reflector
+
+        If replace=False and the snapshot reflector is already running,
+        do nothing.
+
+        If replace=True, a running snapshot reflector will be stopped
+        and a new one started (for recovering from possible errors).
+        """
+        return self._start_reflector("snapshots", SnapshotReflector, replace=replace)
+
     # record a future for the call to .start()
     # so we can use it to terminate .progress()
     def start(self):
@@ -1503,6 +1543,11 @@ class KubeSpawner(Spawner):
             pvc = self.get_pvc_manifest()
 
             try:
+                #TODO: We need to check for a snapshot here and restore if it exists
+                if self.snapshots_enabled:
+                    if self.snapshot_reflector.snapshots.get(self.snapshot_name):
+                        pvc.spec.storage_class_name = "snapshot-promoter"
+                        pvc.metadata.annotations.update({"snapshot.alpha.kubernetes.io/snapshot": self.snapshot_name})
                 yield self.asynchronize(
                     self.api.create_namespaced_persistent_volume_claim,
                     namespace=self.namespace,

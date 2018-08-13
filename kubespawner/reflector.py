@@ -149,6 +149,14 @@ class NamespacedResourceReflector(LoggingConfigurable):
         # return the resource version so we can hook up a watch
         return initial_resources.metadata.resource_version
 
+    def _watch_args(self, resource_version):
+        return {
+            'namespace': self.namespace,
+            'label_selector': self.label_selector,
+            'field_selector': self.field_selector,
+            'resource_version': resource_version,
+        }
+
     def _watch_and_update(self):
         """
         Keeps the current list of resources up-to-date
@@ -194,12 +202,7 @@ class NamespacedResourceReflector(LoggingConfigurable):
                 if not self.first_load_future.done():
                     # signal that we've loaded our initial data
                     self.first_load_future.set_result(None)
-                watch_args = {
-                    'namespace': self.namespace,
-                    'label_selector': self.label_selector,
-                    'field_selector': self.field_selector,
-                    'resource_version': resource_version,
-                }
+                watch_args = self._watch_args(resource_version)
                 if self.request_timeout:
                     # set network receive timeout
                     watch_args['_request_timeout'] = self.request_timeout
@@ -272,3 +275,52 @@ class NamespacedResourceReflector(LoggingConfigurable):
 
     def stopped(self):
         return self._stop_event.is_set()
+
+class CustomNamespacedResourceReflector(NamespacedResourceReflector):
+    custom_api_group_name = Unicode(
+        '',
+        help="""
+        The group to restrict resources to, i.e. volumesnapshot.external-storage.k8s.io
+        """
+    )
+    custom_api_version = Unicode(
+        'v1',
+        help="""
+        The version to restrict to
+        """
+    )
+    custom_api_plural_name = Unicode(
+        '',
+        help="""
+        The plural name of the resource, i.e. volumesnapshots
+        """
+    )
+
+    def _list_and_update(self):
+        """
+        Update current list of resources by doing a full fetch.
+
+        Overwrites all current resource info.
+        """
+        initial_resources = getattr(self.api, self.list_method_name)(
+            self.custom_api_group_name,
+            self.custom_api_version,
+            self.namespace,
+            self.custom_api_plural_name,
+            label_selector=self.label_selector,
+            _request_timeout=self.request_timeout,
+        )
+        # This is an atomic operation on the dictionary!
+        self.resources = {p['metadata']['name']: p for p in initial_resources['items']}
+        # return the resource version so we can hook up a watch
+        return initial_resources['metadata']['resourceVersion']
+
+    def _watch_args(self, resource_version):
+        return {
+            'namespace': self.namespace,
+            'label_selector': self.label_selector,
+            'resource_version': resource_version,
+            'group': self.custom_api_group_name,
+            'version': self.custom_api_version,
+            'plural': self.custom_api_plural_name
+        }
