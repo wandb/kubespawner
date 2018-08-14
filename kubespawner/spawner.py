@@ -1547,7 +1547,10 @@ class KubeSpawner(Spawner):
                 if self.snapshots_enabled:
                     if self.snapshot_reflector.snapshots.get(self.snapshot_name):
                         pvc.spec.storage_class_name = "snapshot-promoter"
-                        pvc.metadata.annotations.update({"snapshot.alpha.kubernetes.io/snapshot": self.snapshot_name})
+                        pvc.metadata.annotations.update({
+                            "snapshot.alpha.kubernetes.io/snapshot": self.snapshot_name,
+                            "volume.beta.kubernetes.io/storage-class": "snapshot-promoter"
+                        })
                 yield self.asynchronize(
                     self.api.create_namespaced_persistent_volume_claim,
                     namespace=self.namespace,
