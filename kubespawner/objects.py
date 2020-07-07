@@ -2,30 +2,31 @@
 Helper methods for generating k8s API objects.
 """
 import json
-from urllib.parse import urlparse
-import escapism
 import re
-import string
+from urllib.parse import urlparse
+
+from kubespawner.utils import get_k8s_model, update_k8s_model
 
 from kubernetes.client.models import (
     V1Pod, V1PodSpec, V1PodSecurityContext,
     V1ObjectMeta,
     V1LocalObjectReference,
     V1Volume, V1VolumeMount,
-    V1Container, V1ContainerPort, V1SecurityContext, V1EnvVar, V1ResourceRequirements,
+    V1Container, V1ContainerPort, V1SecurityContext, V1EnvVar, V1ResourceRequirements, V1Lifecycle,
     V1PersistentVolumeClaim, V1PersistentVolumeClaimSpec,
     V1Endpoints, V1EndpointSubset, V1EndpointAddress, V1EndpointPort,
     V1Service, V1ServiceSpec, V1ServicePort,
-    V1beta1Ingress, V1beta1IngressSpec, V1beta1IngressRule,
-    V1beta1HTTPIngressRuleValue, V1beta1HTTPIngressPath,
-    V1beta1IngressBackend
+    V1Toleration,
+    V1Affinity,
+    V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1PreferredSchedulingTerm, V1NodeSelectorRequirement,
+    V1PodAffinity, V1PodAntiAffinity, V1WeightedPodAffinityTerm, V1PodAffinityTerm,
 )
 
 def make_pod(
     name,
     cmd,
     port,
-    image_spec,
+    image,
     image_pull_policy,
     image_pull_secret=None,
     node_selector=None,
@@ -34,12 +35,12 @@ def make_pod(
     fs_gid=None,
     supplemental_gids=None,
     run_privileged=False,
-    env={},
+    env=None,
     working_dir=None,
-    volumes=[],
-    volume_mounts=[],
-    labels={},
-    annotations={},
+    volumes=None,
+    volume_mounts=None,
+    labels=None,
+    annotations=None,
     cpu_limit=None,
     cpu_guarantee=None,
     mem_limit=None,
@@ -52,7 +53,16 @@ def make_pod(
     extra_container_config=None,
     extra_pod_config=None,
     extra_containers=None,
-    scheduler_name=None
+    scheduler_name=None,
+    tolerations=None,
+    node_affinity_preferred=None,
+    node_affinity_required=None,
+    pod_affinity_preferred=None,
+    pod_affinity_required=None,
+    pod_anti_affinity_preferred=None,
+    pod_anti_affinity_required=None,
+    priority_class_name=None,
+    logger=None,
 ):
     """
     Make a k8s pod specification for running a user notebook.
@@ -62,7 +72,7 @@ def make_pod(
     name:
         Name of pod. Must be unique within the namespace the object is
         going to be created in. Must be a valid DNS label.
-    image_spec:
+    image:
         Image specification - usually a image name and tag in the form
         of image_name:tag. Same thing you would use with docker commandline
         arguments
@@ -85,6 +95,10 @@ def make_pod(
     run_as_gid:
         The GID used to run single-user pods. The default is to run as the primary
         group of the user specified in the Dockerfile, if this is set to None.
+        Setting this parameter requires that *feature-gate* **RunAsGroup** be enabled,
+        otherwise the effective GID of the pod will be 0 (root).  In addition, not
+        setting `run_as_gid` once feature-gate RunAsGroup is enabled will also
+        result in an effective GID of 0 (root).
     fs_gid
         The gid that will own any fresh volumes mounted into this pod, if using
         volume types that support this (such as GCE). This should be a group that
@@ -143,7 +157,64 @@ def make_pod(
     extra_containers:
         Extra containers besides notebook container. Used for some housekeeping jobs (e.g. crontab).
     scheduler_name:
-        A custom scheduler's name.
+        The pod's scheduler explicitly named.
+    tolerations:
+        Tolerations can allow a pod to schedule or execute on a tainted node. To
+        learn more about pod tolerations, see
+        https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/.
+
+        Pass this field an array of "Toleration" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#nodeselectorterm-v1-core
+    node_affinity_preferred:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "PreferredSchedulingTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#preferredschedulingterm-v1-core
+    node_affinity_required:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "NodeSelectorTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#nodeselectorterm-v1-core
+    pod_affinity_preferred:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "WeightedPodAffinityTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#weightedpodaffinityterm-v1-core
+    pod_affinity_required:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "PodAffinityTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#podaffinityterm-v1-core
+    pod_anti_affinity_preferred:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "WeightedPodAffinityTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#weightedpodaffinityterm-v1-core
+    pod_anti_affinity_required:
+        Affinities describe where pods prefer or require to be scheduled, they
+        may prefer or require a node to have a certain label or be in proximity
+        / remoteness to another pod. To learn more visit
+        https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+
+        Pass this field an array of "PodAffinityTerm" objects.*
+        * https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.10/#podaffinityterm-v1-core
+    priority_class_name:
+        The name of the PriorityClass to be assigned the pod. This feature is Beta available in K8s 1.11.
     """
 
     pod = V1Pod()
@@ -152,23 +223,12 @@ def make_pod(
 
     pod.metadata = V1ObjectMeta(
         name=name,
-        labels=labels.copy(),
-        annotations=annotations.copy()
+        labels=(labels or {}).copy(),
+        annotations=(annotations or {}).copy()
     )
 
     pod.spec = V1PodSpec(containers=[])
-    pod.spec.restartPolicy = 'Never'
-
-    security_context = V1PodSecurityContext()
-    if fs_gid is not None:
-        security_context.fs_group = int(fs_gid)
-    if supplemental_gids is not None and supplemental_gids:
-        security_context.supplemental_groups = [int(gid) for gid in supplemental_gids]
-    if run_as_uid is not None:
-        security_context.run_as_user = int(run_as_uid)
-    if run_as_gid is not None:
-        security_context.run_as_group = int(run_as_gid)
-    pod.spec.security_context = security_context
+    pod.spec.restart_policy = 'OnFailure'
 
     if image_pull_secret is not None:
         pod.spec.image_pull_secrets = []
@@ -179,17 +239,53 @@ def make_pod(
     if node_selector:
         pod.spec.node_selector = node_selector
 
+    if lifecycle_hooks:
+        lifecycle_hooks = get_k8s_model(V1Lifecycle, lifecycle_hooks)
+
+    # There are security contexts both on the Pod level or the Container level.
+    # The security settings that you specify for a Pod apply to all Containers
+    # in the Pod, but settings on the container level can override them.
+    #
+    # We configure the pod to be spawned on the container level unless the
+    # option is only available on the pod level, such as for those relating to
+    # the volumes as compared to the running user of the container. Volumes
+    # belong to the pod and are only mounted by containers after all.
+    #
+    # ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+    # ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#securitycontext-v1-core (container)
+    # ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#podsecuritycontext-v1-core (pod)
+    pod_security_context = V1PodSecurityContext()
+    if fs_gid is not None:
+       pod_security_context.fs_group = int(fs_gid)
+    if supplemental_gids is not None and supplemental_gids:
+       pod_security_context.supplemental_groups = [int(gid) for gid in supplemental_gids]
+    # Only clutter pod spec with actual content
+    if not all([e is None for e in pod_security_context.to_dict().values()]):
+        pod.spec.security_context = pod_security_context
+
+    container_security_context = V1SecurityContext()
+    if run_as_uid is not None:
+        container_security_context.run_as_user = int(run_as_uid)
+    if run_as_gid is not None:
+        container_security_context.run_as_group = int(run_as_gid)
+    if run_privileged:
+        container_security_context.privileged = True
+    # Only clutter container spec with actual content
+    if all([e is None for e in container_security_context.to_dict().values()]):
+        container_security_context = None
+
     notebook_container = V1Container(
         name='notebook',
-        image=image_spec,
+        image=image,
         working_dir=working_dir,
         ports=[V1ContainerPort(name='notebook-port', container_port=port)],
-        env=[V1EnvVar(k, v) for k, v in env.items()],
+        env=[V1EnvVar(k, v) for k, v in (env or {}).items()],
         args=cmd,
         image_pull_policy=image_pull_policy,
         lifecycle=lifecycle_hooks,
         resources=V1ResourceRequirements(),
-        volume_mounts=volume_mounts
+        volume_mounts=[get_k8s_model(V1VolumeMount, obj) for obj in (volume_mounts or [])],
+        security_context=container_security_context,
     )
 
     if service_account is None:
@@ -199,10 +295,6 @@ def make_pod(
     else:
         pod.spec.service_account_name = service_account
 
-    if run_privileged:
-        notebook_container.security_context = V1SecurityContext(
-            privileged=True
-        )
 
     notebook_container.resources.requests = {}
     if cpu_guarantee:
@@ -210,8 +302,7 @@ def make_pod(
     if mem_guarantee:
         notebook_container.resources.requests['memory'] = mem_guarantee
     if extra_resource_guarantees:
-        for k in extra_resource_guarantees:
-            notebook_container.resources.requests[k] = extra_resource_guarantees[k]
+        notebook_container.resources.requests.update(extra_resource_guarantees)
 
     notebook_container.resources.limits = {}
     if cpu_limit:
@@ -219,48 +310,116 @@ def make_pod(
     if mem_limit:
         notebook_container.resources.limits['memory'] = mem_limit
     if extra_resource_limits:
-        for k in extra_resource_limits:
-            notebook_container.resources.limits[k] = extra_resource_limits[k]
+        notebook_container.resources.limits.update(extra_resource_limits)
+
+    if extra_container_config:
+        notebook_container = update_k8s_model(
+            target=notebook_container,
+            changes=extra_container_config,
+            logger=logger,
+            target_name="notebook_container",
+            changes_name="extra_container_config",
+        )
 
     pod.spec.containers.append(notebook_container)
 
-    if extra_container_config:
-        for key, value in extra_container_config.items():
-            setattr(notebook_container, _map_attribute(notebook_container.attribute_map, key), value)
-    if extra_pod_config:
-        for key, value in extra_pod_config.items():
-            setattr(pod.spec, _map_attribute(pod.spec.attribute_map, key), value)
     if extra_containers:
-        pod.spec.containers.extend(extra_containers)
-
-    pod.spec.init_containers = init_containers
-    pod.spec.volumes = volumes
-
+        pod.spec.containers.extend([get_k8s_model(V1Container, obj) for obj in extra_containers])
+    if tolerations:
+        pod.spec.tolerations = [get_k8s_model(V1Toleration, obj) for obj in tolerations]
+    if init_containers:
+        pod.spec.init_containers = [get_k8s_model(V1Container, obj) for obj in init_containers]
+    if volumes:
+        pod.spec.volumes = [get_k8s_model(V1Volume, obj) for obj in volumes]
+    else:
+        # Keep behaving exactly like before by not cleaning up generated pod
+        # spec by setting the volumes field even though it is an empty list.
+        pod.spec.volumes = []
     if scheduler_name:
         pod.spec.scheduler_name = scheduler_name
 
+    node_affinity = None
+    if node_affinity_preferred or node_affinity_required:
+        node_selector = None
+        if node_affinity_required:
+            node_selector = V1NodeSelector(
+                node_selector_terms=[get_k8s_model(V1NodeSelectorTerm, obj) for obj in node_affinity_required],
+            )
+
+        preferred_scheduling_terms = None
+        if node_affinity_preferred:
+            preferred_scheduling_terms = [get_k8s_model(V1PreferredSchedulingTerm, obj) for obj in node_affinity_preferred]
+
+        node_affinity = V1NodeAffinity(
+            preferred_during_scheduling_ignored_during_execution=preferred_scheduling_terms,
+            required_during_scheduling_ignored_during_execution=node_selector,
+        )
+
+    pod_affinity = None
+    if pod_affinity_preferred or pod_affinity_required:
+        weighted_pod_affinity_terms = None
+        if pod_affinity_preferred:
+            weighted_pod_affinity_terms = [get_k8s_model(V1WeightedPodAffinityTerm, obj) for obj in pod_affinity_preferred]
+
+        pod_affinity_terms = None
+        if pod_affinity_required:
+            pod_affinity_terms = [get_k8s_model(V1PodAffinityTerm, obj) for obj in pod_affinity_required]
+
+        pod_affinity = V1PodAffinity(
+            preferred_during_scheduling_ignored_during_execution=weighted_pod_affinity_terms,
+            required_during_scheduling_ignored_during_execution=pod_affinity_terms,
+        )
+
+    pod_anti_affinity = None
+    if pod_anti_affinity_preferred or pod_anti_affinity_required:
+        weighted_pod_affinity_terms = None
+        if pod_anti_affinity_preferred:
+            weighted_pod_affinity_terms = [get_k8s_model(V1WeightedPodAffinityTerm, obj) for obj in pod_anti_affinity_preferred]
+
+        pod_affinity_terms = None
+        if pod_anti_affinity_required:
+            pod_affinity_terms = [get_k8s_model(V1PodAffinityTerm, obj) for obj in pod_anti_affinity_required]
+
+        pod_anti_affinity = V1PodAffinity(
+            preferred_during_scheduling_ignored_during_execution=weighted_pod_affinity_terms,
+            required_during_scheduling_ignored_during_execution=pod_affinity_terms,
+        )
+
+    affinity = None
+    if (node_affinity or pod_affinity or pod_anti_affinity):
+        affinity = V1Affinity(
+            node_affinity=node_affinity,
+            pod_affinity=pod_affinity,
+            pod_anti_affinity=pod_anti_affinity,
+        )
+
+    if affinity:
+        pod.spec.affinity = affinity
+
+    if priority_class_name:
+        pod.spec.priority_class_name = priority_class_name
+
+    if extra_pod_config:
+        pod.spec = update_k8s_model(
+            target=pod.spec,
+            changes=extra_pod_config,
+            logger=logger,
+            target_name="pod.spec",
+            changes_name="extra_pod_config",
+        )
+
     return pod
-
-
-def _map_attribute(attribute_map, attribute):
-    if attribute in attribute_map:
-        return attribute
-
-    for key, value in attribute_map.items():
-        if value == attribute:
-            return key
-    else:
-        raise ValueError('Attribute must be one of {}'.format(attribute_map.values()))
 
 
 def make_pvc(
     name,
     storage_class,
     access_modes,
+    selector,
     storage,
-    labels,
-    annotations={}
-    ):
+    labels=None,
+    annotations=None,
+):
     """
     Make a k8s pvc specification for running a user notebook.
 
@@ -273,6 +432,8 @@ def make_pvc(
         String of the name of the k8s Storage Class to use.
     access_modes:
         A list of specifying what access mode the pod should have towards the pvc
+    selector:
+        Dictionary Selector to match pvc to pv.
     storage:
         The ammount of storage needed for the pvc
 
@@ -282,17 +443,19 @@ def make_pvc(
     pvc.api_version = "v1"
     pvc.metadata = V1ObjectMeta()
     pvc.metadata.name = name
-    pvc.metadata.annotations = annotations
-    pvc.metadata.labels = {}
-    pvc.metadata.labels.update(labels)
+    pvc.metadata.annotations = (annotations or {}).copy()
+    pvc.metadata.labels = (labels or {}).copy()
     pvc.spec = V1PersistentVolumeClaimSpec()
     pvc.spec.access_modes = access_modes
     pvc.spec.resources = V1ResourceRequirements()
     pvc.spec.resources.requests = {"storage": storage}
 
-    if storage_class:
+    if storage_class is not None:
         pvc.metadata.annotations.update({"volume.beta.kubernetes.io/storage-class": storage_class})
         pvc.spec.storage_class_name = storage_class
+
+    if selector:
+        pvc.spec.selector = selector
 
     return pvc
 
@@ -305,6 +468,28 @@ def make_ingress(
     """
     Returns an ingress, service, endpoint object that'll work for this service
     """
+
+    # move beta imports here,
+    # which are more sensitive to kubernetes version
+    # and will change when they move out of beta
+    # because of the API changes in 1.16, the import is tried conditionally
+    # to keep compatibility with older K8S versions
+
+    try:
+        from kubernetes.client.models import (
+            ExtensionsV1beta1Ingress, ExtensionsV1beta1IngressSpec, ExtensionsV1beta1IngressRule,
+            ExtensionsV1beta1HTTPIngressRuleValue, ExtensionsV1beta1HTTPIngressPath,
+            ExtensionsV1beta1IngressBackend,
+        )
+    except ImportError:
+        from kubernetes.client.models import (
+            V1beta1Ingress as ExtensionsV1beta1Ingress, V1beta1IngressSpec as ExtensionsV1beta1IngressSpec,
+            V1beta1IngressRule as ExtensionsV1beta1IngressRule,
+            V1beta1HTTPIngressRuleValue as ExtensionsV1beta1HTTPIngressRuleValue,
+            V1beta1HTTPIngressPath as ExtensionsV1beta1HTTPIngressPath,
+            V1beta1IngressBackend as ExtensionsV1beta1IngressBackend
+        )
+
     meta = V1ObjectMeta(
         name=name,
         annotations={
@@ -371,17 +556,17 @@ def make_ingress(
         )
 
     # Make Ingress object
-    ingress = V1beta1Ingress(
+    ingress = ExtensionsV1beta1Ingress(
         kind='Ingress',
         metadata=meta,
-        spec=V1beta1IngressSpec(
-            rules=[V1beta1IngressRule(
+        spec=ExtensionsV1beta1IngressSpec(
+            rules=[ExtensionsV1beta1IngressRule(
                 host=host,
-                http=V1beta1HTTPIngressRuleValue(
+                http=ExtensionsV1beta1HTTPIngressRuleValue(
                     paths=[
-                        V1beta1HTTPIngressPath(
+                        ExtensionsV1beta1HTTPIngressPath(
                             path=path,
-                            backend=V1beta1IngressBackend(
+                            backend=ExtensionsV1beta1IngressBackend(
                                 service_name=name,
                                 service_port=target_port
                             )

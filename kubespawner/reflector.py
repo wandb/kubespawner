@@ -108,6 +108,18 @@ class NamespacedResourceReflector(LoggingConfigurable):
         """
     )
 
+    restart_seconds = Int(
+        30,
+        config=True,
+        help="""
+        Maximum time before restarting a watch.
+
+        The watch will be restarted at least this often,
+        even if events are still arriving.
+        Avoids trusting kubernetes watch to yield all events,
+        which seems to not be a safe assumption.
+        """)
+
     on_failure = Any(help="""Function to be called when the reflector gives up.""")
 
     def __init__(self, *args, **kwargs):
@@ -196,6 +208,7 @@ class NamespacedResourceReflector(LoggingConfigurable):
         )
         while True:
             self.log.debug("Connecting %s watcher", self.kind)
+            start = time.monotonic()
             w = watch.Watch()
             try:
                 resource_version = self._list_and_update()
@@ -211,13 +224,20 @@ class NamespacedResourceReflector(LoggingConfigurable):
                     watch_args['timeout_seconds'] = self.timeout_seconds
                 # in case of timeout_seconds, the w.stream just exits (no exception thrown)
                 # -> we stop the watcher and start a new one
-                for ev in w.stream(
-                        getattr(self.api, self.list_method_name),
-                        **watch_args
+                for watch_event in w.stream(
+                    getattr(self.api, self.list_method_name),
+                    **watch_args
                 ):
+                    # Remember that these events are k8s api related WatchEvents
+                    # objects, not k8s Event or Pod representations, they will
+                    # reside in the WatchEvent's object field depending on what
+                    # kind of resource is watched.
+                    #
+                    # ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#watchevent-v1-meta
+                    # ref: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.16/#event-v1-core
                     cur_delay = 0.1
-                    resource = ev['object']
-                    if ev['type'] == 'DELETED':
+                    resource = watch_event['object']
+                    if watch_event['type'] == 'DELETED':
                         # This is an atomic delete operation on the dictionary!
                         self.resources.pop(resource.metadata.name, None)
                     else:
@@ -225,6 +245,13 @@ class NamespacedResourceReflector(LoggingConfigurable):
                         self.resources[resource.metadata.name] = resource
                     if self._stop_event.is_set():
                         self.log.info("%s watcher stopped", self.kind)
+                        break
+                    watch_duration = time.monotonic() - start
+                    if watch_duration >= self.restart_seconds:
+                        self.log.debug(
+                            "Restarting %s watcher after %i seconds",
+                            self.kind, watch_duration,
+                        )
                         break
             except ReadTimeoutError:
                 # network read time out, just continue and restart the watch
